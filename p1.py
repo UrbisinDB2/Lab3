@@ -1,6 +1,5 @@
 import struct, os
-
-BLOCK_FACTOR = 3
+from math import floor
 
 class Record:
     FORMAT = 'i40sif15s'
@@ -27,6 +26,10 @@ class Record:
     def __str__(self):
         return (str(self.id) + " | " + self.nombre + " | " + str(self.cantidad) + " | " +
                 str(self.precio) + " | " + str(self.fecha))
+
+BUFFER_SIZE = 1024
+BLOCK_FACTOR = 5
+INDEX_FACTOR = 5
 
 class Page:
     FORMAT_HEADER = 'ii' #size, next_page
@@ -61,7 +64,60 @@ class Page:
             offset += Record.SIZE_OF_RECORD
         return Page(records, next_page)
 
-class DataFile:
+class IndexFile:
+    FORMAT_HEADER = 'i'
+    SIZE_HEADER = struct.calcsize(FORMAT_HEADER)
+    SIZE_OF_INDEX = SIZE_HEADER + INDEX_FACTOR
+
+    def __init__(self, file_name):
+        self.file_name = file_name
+
+    def search_position(self, record_id: int):
+        record_size = struct.calcsize('ii')  # min_key, page_no
+
+        with open(self.file_name, 'rb') as file:
+            file.seek(0, 2)
+            num_entries = file.tell() // record_size
+            left, right = 0, num_entries - 1
+            result_page = None
+
+            while left <= right:
+                mid = (left + right) // 2
+                file.seek(mid * record_size, 0)
+                data = file.read(record_size)
+                min_key, page_no = struct.unpack('ii', data)
+
+                if record_id >= min_key:
+                    result_page = page_no
+                    left = mid + 1  # buscar a la derecha
+                else:
+                    right = mid - 1  # buscar a la izquierda
+
+            # Si no encontró nada, por defecto va a la primera página
+            return result_page if result_page is not None else 0
+
+    def build(self, data_file: str):
+        with open(data_file, 'rb') as df, open(self.file_name, 'wb') as idxf:
+            df.seek(0, 2)
+            numPages = df.tell() // Page.SIZE_OF_PAGE
+            df.seek(0, 0)
+            for page_num in range(numPages):
+                page_data = df.read(Page.SIZE_OF_PAGE)
+                page = Page.unpack(page_data)
+                if page.records:
+                    first_key = page.records[0].id
+                    idxf.write(struct.pack(self.FORMAT, first_key, page_num))
+
+    def scanALL(self):
+        try:
+            with open(self.file_name, 'rb') as file:
+                while entry := file.read(self.SIZE_OF_RECORD):
+                    key, page_pos = struct.unpack(self.FORMAT, entry)
+                    print(f"Key: {key} | Page: {page_pos}")
+        except FileNotFoundError:
+            print("File not found")
+
+class ISAM:
     def __init__(self, file_name):
         self.file_name = file_name
 
@@ -107,65 +163,12 @@ class DataFile:
                 for record in page.records:
                     print(record)
 
-class IndexFile:
-    FORMAT = 'ii'
-    SIZE_OF_RECORD = struct.calcsize(FORMAT)
-
-    def __init__(self, file_name):
-        self.file_name = file_name
-
-    def _search_position(self, record_id: int):
-        record_size = struct.calcsize('ii')  # min_key, page_no
-
-        with open(self.file_name, 'rb') as file:
-            file.seek(0, 2)
-            num_entries = file.tell() // record_size
-            left, right = 0, num_entries - 1
-            result_page = None
-
-            while left <= right:
-                mid = (left + right) // 2
-                file.seek(mid * record_size, 0)
-                data = file.read(record_size)
-                min_key, page_no = struct.unpack('ii', data)
-
-                if record_id >= min_key:
-                    result_page = page_no
-                    left = mid + 1  # buscar a la derecha
-                else:
-                    right = mid - 1  # buscar a la izquierda
-
-            # Si no encontró nada, por defecto va a la primera página
-            return result_page if result_page is not None else 0
-
-    def build(self, data_file: str):
-        with open(data_file, 'rb') as df, open(self.file_name, 'wb') as idxf:
-            df.seek(0, 2)
-            numPages = df.tell() // Page.SIZE_OF_PAGE
-            df.seek(0, 0)
-            for page_num in range(numPages):
-                page_data = df.read(Page.SIZE_OF_PAGE)
-                page = Page.unpack(page_data)
-                if page.records:
-                    first_key = page.records[0].id
-                    idxf.write(struct.pack(self.FORMAT, first_key, page_num))
-
-    def scanALL(self):
-        try:
-            with open(self.file_name, 'rb') as file:
-                while entry := file.read(self.SIZE_OF_RECORD):
-                    key, page_pos = struct.unpack(self.FORMAT, entry)
-                    print(f"Key: {key} | Page: {page_pos}")
-        except FileNotFoundError:
-            print("File not found")
-
 ## Main
 indexf = IndexFile("index.dat")
 dataf = DataFile("data.dat")
 dataf.add(Record(1, "Estabilizador de Voltaje", 25, 192.26, "2024-10-21"))
 dataf.add(Record(2, "Bascula Inteligente", 43, 1809.71, "2024-05-07"))
 dataf.add(Record(3, "Estabilizador de Voltaje", 7, 1204.21, "2024-08-21"))
-indexf.build("data.dat")
 indexf.scanALL()
 dataf.scanAll()
 
