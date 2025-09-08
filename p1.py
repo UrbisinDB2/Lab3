@@ -69,47 +69,64 @@ class IndexFile:
     SIZE_HEADER = struct.calcsize(FORMAT_HEADER)
     SIZE_OF_INDEX = SIZE_HEADER + struct.calcsize('i') * INDEX_FACTOR + struct.calcsize('i') * (INDEX_FACTOR + 1)
 
-    def __init__(self, file_name: str, pages, keys):
+    def __init__(self, file_name: str):
         self.file_name = file_name
+        self.pages = []
+        self.keys = []
 
-    def pack(self) -> bytes:
-        pass #TODO
+    def getIndex(self):
+        pages = []
+        keys = []
+        with open(self.file_name, 'rb') as file:
+            size = struct.unpack('i', file.read(4))[0]
 
-    def unpack(self, data: bytes):
-        pass #TODO
+            for i in range(size):
+                pi = struct.unpack('i', file.read(4))[0]
+                pages.append(pi)
+                ki = struct.unpack('i', file.read(4))[0]
+                keys.append(ki)
 
-    def addIndex(self, page: Page):
+        return pages, keys
+
+
+    def addIndex(self, page_pos: int, key: int):
+        import os
+        if not os.path.exists(self.file_name):
+            with open(self.file_name, 'wb') as file:
+                file.write(struct.pack(self.FORMAT_HEADER, 1))
+                file.write(struct.pack('i', page_pos))
+                file.write(struct.pack('i', key))
+            return
 
     def search_position(self, record_id: int):
-        record_size = struct.calcsize('ii')  # min_key, page_no
+        pages, keys = self.getIndex()
 
-        with open(self.file_name, 'rb') as file:
-            file.seek(0, 2)
-            num_entries = file.tell() // record_size
-            left, right = 0, num_entries - 1
-            result_page = None
+        left, right = 0, len(keys) - 1
 
-            while left <= right:
-                mid = (left + right) // 2
-                file.seek(mid * record_size, 0)
-                data = file.read(record_size)
-                min_key, page_no = struct.unpack('ii', data)
+        while left <= right:
+            mid = (left + right) // 2
+            if keys[mid] < record_id:
+                left = mid + 1
+            else:
+                right = mid - 1
 
-                if record_id >= min_key:
-                    result_page = page_no
-                    left = mid + 1  # buscar a la derecha
-                else:
-                    right = mid - 1  # buscar a la izquierda
 
-            # Si no encontró nada, por defecto va a la primera página
-            return result_page if result_page is not None else 0
+
+        return left
+
 
     def scanALL(self):
         try:
             with open(self.file_name, 'rb') as file:
-                while entry := file.read(self.SIZE_OF_RECORD):
-                    key, page_pos = struct.unpack(self.FORMAT, entry)
-                    print(f"Key: {key} | Page: {page_pos}")
+                size = struct.unpack(self.FORMAT_HEADER, file.read(self.SIZE_HEADER))[0]
+                print("Index Size = ", str(size))
+            pages, keys = self.getIndex()
+            print("Pages: ", end='')
+            for page in pages:
+                print(str(page) + ", ")
+            print("Keys: ", end='')
+            for key in keys:
+                print(str(key) + ", ")
         except FileNotFoundError:
             print("File not found")
 
@@ -118,33 +135,37 @@ class ISAM:
         self.file_name = file_name
 
     def add(self, record: Record):
-        # 1- si el archivo no existe, crearlo con una sola pagina y registro
+        indexf = IndexFile("index.dat")
         if not os.path.exists(self.file_name):
             with open(self.file_name, 'wb') as file:
                 new_page = Page([record])
+                page_pos = file.tell()
+                indexf.addIndex(page_pos, record.id)
                 file.write(new_page.pack())
             return
-        # 2- si el archivo existe, recuperar la ultima pagina
-        # 2.1- agregar el registro y regresar la pagina al archivo
-        indexf = IndexFile("index.dat")
-        indexf._search_position(record.id)
+
+        pos = indexf.search_position(record.id)
+        print("Pos = ", pos)
 
         with open(self.file_name, 'r+b') as file:
-            file.seek(0, 2)
-            filesize = file.tell()
-            pos_last_page = filesize - Page.SIZE_OF_PAGE
-            file.seek(pos_last_page, 0)
-            page = Page.unpack(file.read(Page.SIZE_OF_PAGE))
-            # si hay espacio, agregamos el registro a la pagina
-            if len(page.records) < BLOCK_FACTOR:
-                page.records.append(record)
-                file.seek(pos_last_page, 0)
-                file.write(page.pack())
-            else:
-                # crear nueva pagina
-                file.seek(0, 2)
-                new_page = Page([record])
-                file.write(new_page.pack())
+            file.seek()
+
+        # with open(self.file_name, 'r+b') as file:
+        #     file.seek(0, 2)
+        #     filesize = file.tell()
+        #     pos_last_page = filesize - Page.SIZE_OF_PAGE
+        #     file.seek(pos_last_page, 0)
+        #     page = Page.unpack(file.read(Page.SIZE_OF_PAGE))
+        #     # si hay espacio, agregamos el registro a la pagina
+        #     if len(page.records) < BLOCK_FACTOR:
+        #         page.records.append(record)
+        #         file.seek(pos_last_page, 0)
+        #         file.write(page.pack())
+        #     else:
+        #         # crear nueva pagina
+        #         file.seek(0, 2)
+        #         new_page = Page([record])
+        #         file.write(new_page.pack())
 
     def scanAll(self):
         # Iterar en todas las paginas y mostrar la informacion de los registros
@@ -160,11 +181,11 @@ class ISAM:
                     print(record)
 
 ## Main
-indexf = IndexFile("index.dat")
 dataf = ISAM("data.dat")
+indexf = IndexFile("index.dat")
 dataf.add(Record(1, "Estabilizador de Voltaje", 25, 192.26, "2024-10-21"))
-dataf.add(Record(2, "Bascula Inteligente", 43, 1809.71, "2024-05-07"))
-dataf.add(Record(3, "Estabilizador de Voltaje", 7, 1204.21, "2024-08-21"))
+# dataf.add(Record(2, "Bascula Inteligente", 43, 1809.71, "2024-05-07"))
+# dataf.add(Record(3, "Estabilizador de Voltaje", 7, 1204.21, "2024-08-21"))
 indexf.scanALL()
 dataf.scanAll()
 
