@@ -67,10 +67,18 @@ class Page:
 class IndexFile:
     FORMAT_HEADER = 'i'
     SIZE_HEADER = struct.calcsize(FORMAT_HEADER)
-    SIZE_OF_INDEX = SIZE_HEADER + INDEX_FACTOR
+    SIZE_OF_INDEX = SIZE_HEADER + struct.calcsize('i') * INDEX_FACTOR + struct.calcsize('i') * (INDEX_FACTOR + 1)
 
-    def __init__(self, file_name):
+    def __init__(self, file_name: str, pages, keys):
         self.file_name = file_name
+
+    def pack(self) -> bytes:
+        pass #TODO
+
+    def unpack(self, data: bytes):
+        pass #TODO
+
+    def addIndex(self, page: Page):
 
     def search_position(self, record_id: int):
         record_size = struct.calcsize('ii')  # min_key, page_no
@@ -95,18 +103,6 @@ class IndexFile:
 
             # Si no encontró nada, por defecto va a la primera página
             return result_page if result_page is not None else 0
-
-    def build(self, data_file: str):
-        with open(data_file, 'rb') as df, open(self.file_name, 'wb') as idxf:
-            df.seek(0, 2)
-            numPages = df.tell() // Page.SIZE_OF_PAGE
-            df.seek(0, 0)
-            for page_num in range(numPages):
-                page_data = df.read(Page.SIZE_OF_PAGE)
-                page = Page.unpack(page_data)
-                if page.records:
-                    first_key = page.records[0].id
-                    idxf.write(struct.pack(self.FORMAT, first_key, page_num))
 
     def scanALL(self):
         try:
@@ -165,7 +161,7 @@ class ISAM:
 
 ## Main
 indexf = IndexFile("index.dat")
-dataf = DataFile("data.dat")
+dataf = ISAM("data.dat")
 dataf.add(Record(1, "Estabilizador de Voltaje", 25, 192.26, "2024-10-21"))
 dataf.add(Record(2, "Bascula Inteligente", 43, 1809.71, "2024-05-07"))
 dataf.add(Record(3, "Estabilizador de Voltaje", 7, 1204.21, "2024-08-21"))
