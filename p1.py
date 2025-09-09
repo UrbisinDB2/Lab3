@@ -116,7 +116,6 @@ class IndexFile:
 
         return pages, keys
 
-
     def addIndex(self, page_pos: int, key: int):
         if not os.path.exists(self.file_name):
             with open(self.file_name, 'wb') as file:
@@ -184,6 +183,28 @@ class IndexFile:
 
         return True
 
+    def updateIndexKey(self, page_pos: int, new_key: int) -> bool:
+        if not os.path.exists(self.file_name):
+            return False
+
+        with open(self.file_name, 'r+b') as file:
+            size = struct.unpack('i', file.read(4))[0]
+            if size <= 1:
+                return False  # sólo p0
+
+            p0 = struct.unpack('i', file.read(4))[0]  # no se usa, pero avanzamos
+            # Estructura: [k1][p1][k2][p2]...
+            for _ in range(1, size):
+                k_offset = file.tell()  # posición de k_i
+                _ki = struct.unpack('i', file.read(4))[0]
+                pi = struct.unpack('i', file.read(4))[0]
+
+                if pi == page_pos:
+                    file.seek(k_offset)
+                    file.write(struct.pack('i', new_key))
+                    return True
+        return False
+
     def search_position(self, record_id: int):
         pages, keys = self.getIndex()
 
@@ -204,8 +225,34 @@ class IndexFile:
 
         return left + 1
 
+    def find_page_for_search(self, record_id: int):
+        pages, keys = self.getIndex()
 
-    def scanALL(self):
+        # Caso: no hay claves → toda la data está en p0
+        if len(keys) == 0:
+            return pages[0]
+
+        # Si el record_id es menor que la primera clave, está en p0
+        if record_id < keys[0]:
+            return pages[0]
+
+        # Si es mayor que todas las claves, va a la última página
+        if record_id >= keys[-1]:
+            return pages[-1]
+
+        # Caso general → buscar página correcta
+        left, right = 0, len(keys) - 1
+        while left <= right:
+            mid = (left + right) // 2
+            if keys[mid] <= record_id:
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        # pages[0] es p0, keys[0] corresponde a pages[1]
+        return pages[left]
+
+    def scanAll(self):
         try:
             with open(self.file_name, 'rb') as file:
                 size = struct.unpack(self.FORMAT_HEADER, file.read(self.SIZE_HEADER))[0]
@@ -224,6 +271,33 @@ class IndexFile:
 class ISAM:
     def __init__(self, file_name):
         self.file_name = file_name
+
+    def _page_size(self) -> int:
+        return Page.SIZE_OF_PAGE
+
+    def _read_page(self, page_pos: int) -> Page:
+        with open(self.file_name, 'rb') as f:
+            f.seek(page_pos)
+            data = f.read(self._page_size())
+        return Page.unpack(data)
+
+    def _write_page(self, page_pos: int, page: Page) -> None:
+        with open(self.file_name, 'r+b') as f:
+            f.seek(page_pos)
+            f.write(page.pack())
+
+    def _find_in_page(self, page: Page, record_id: int):
+        left, right = 0, len(page.records) - 1
+        while left <= right:
+            mid = (left + right) // 2
+            mid_id = page.records[mid].id
+            if mid_id == record_id:
+                return mid, True
+            if mid_id < record_id:
+                left = mid + 1
+            else:
+                right = mid - 1
+        return left, False
 
     def add(self, record: Record):
         indexf = IndexFile("index.dat")
@@ -299,10 +373,47 @@ class ISAM:
                 return "Record inserted successfully"
 
     def search(self, record_id: int):
-        pass
+        """
+        Devuelve el Record si lo encuentra; None si no existe.
+        """
+        indexf = IndexFile("index.dat")
+        try:
+            page_pos = indexf.find_page_for_search(record_id)
+        except FileNotFoundError:
+            return None
+
+        # Leer la página correspondiente
+        page = self._read_page(page_pos)
+        pos, found = self._find_in_page(page, record_id)
+        if found:
+            return page.records[pos]
+        return None
 
     def delete(self, record_id: int):
-        pass
+        indexf = IndexFile("index.dat")
+        try:
+            page_pos = indexf.find_page_for_search(record_id)
+        except FileNotFoundError:
+            return False
+
+        # Cargar página y buscar binario dentro
+        page = self._read_page(page_pos)
+        pos, found = self._find_in_page(page, record_id)
+        if not found:
+            return False
+
+        # Borrar y reescribir la página
+        was_first = (pos == 0)
+        del page.records[pos]
+        self._write_page(page_pos, page)
+
+        # Si borré el primero y la página aún tiene registros, actualizar clave del índice
+        if was_first and len(page.records) > 0:
+            new_first_key = page.records[0].id
+            indexf.updateIndexKey(page_pos, new_first_key)
+
+        # Si la página quedó vacía, la dejamos así (sin tocar el índice)
+        return True
 
     def scanAll(self):
         # Iterar en todas las paginas y mostrar la informacion de los registros
@@ -342,6 +453,52 @@ with open("sales_dataset_unsorted.csv", newline='', encoding="utf-8") as csvfile
 for record in records:
     isamf.add(record)
 
-indexf.scanALL()
+indexf.scanAll()
 isamf.scanAll()
 
+print("\n=== PRUEBAS BÁSICAS DE SEARCH Y DELETE ===")
+
+# IDs de prueba fijos
+id_existente_250 = 250
+id_existente_2 = 500
+id_existente_3 = 1000
+id_inexistente = 1500
+
+# --- SEARCH ---
+print("\n-- SEARCH --")
+res = isamf.search(id_existente_250)
+print(f"Buscar {id_existente_250}: {'ENCONTRADO -> ' + str(res) if res else 'NO ENCONTRADO'}")
+
+res = isamf.search(id_existente_2)
+print(f"Buscar {id_existente_2}: {'ENCONTRADO -> ' + str(res) if res else 'NO ENCONTRADO'}")
+
+res = isamf.search(id_existente_3)
+print(f"Buscar {id_existente_3}: {'ENCONTRADO -> ' + str(res) if res else 'NO ENCONTRADO'}")
+
+res = isamf.search(id_inexistente)
+print(f"Buscar {id_inexistente}: {'ENCONTRADO -> ' + str(res) if res else 'NO ENCONTRADO'}")
+
+# --- DELETE ---
+print("\n-- DELETE --")
+ok = isamf.delete(id_existente_2)
+print(f"Eliminar {id_existente_2}: {'OK' if ok else 'NO ENCONTRADO'}")
+
+res = isamf.search(id_existente_2)
+print(f"Re-buscar {id_existente_2}: {'ENCONTRADO -> ' + str(res) if res else 'NO ENCONTRADO'}")
+
+# --- DELETE DEL PRIMER REGISTRO DE UNA PÁGINA ---
+ok = isamf.delete(id_existente_250)
+print(f"Eliminar {id_existente_250}: {'OK' if ok else 'NO ENCONTRADO'}")
+
+res = isamf.search(id_existente_250)
+print(f"Re-buscar {id_existente_250}: {'ENCONTRADO -> ' + str(res) if res else 'NO ENCONTRADO'}")
+
+# --- SANITY CHECK: un ID válido que debería seguir existiendo ---
+res = isamf.search(id_existente_3)
+print(f"Buscar {id_existente_3} (control): {'ENCONTRADO -> ' + str(res) if res else 'NO ENCONTRADO'}")
+
+# Estado actual del índice y las páginas
+print("\n-- ESTADO ACTUAL DEL ÍNDICE --")
+indexf.scanAll()
+print("\n-- ESTADO ACTUAL DE LAS PÁGINAS --")
+isamf.scanAll()
