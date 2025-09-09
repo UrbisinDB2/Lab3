@@ -1,4 +1,4 @@
-import struct, os
+import struct, os, csv
 from math import floor
 
 class Record:
@@ -28,8 +28,8 @@ class Record:
                 str(self.precio) + " | " + str(self.fecha))
 
 BUFFER_SIZE = 1024
-BLOCK_FACTOR = 5
-INDEX_FACTOR = 5
+BLOCK_FACTOR = 23
+INDEX_FACTOR = 127
 
 class Page:
     FORMAT_HEADER = 'ii' #size, next_page
@@ -134,6 +134,55 @@ class IndexFile:
             file.seek(0)
             file.write(struct.pack(self.FORMAT_HEADER, size))
 
+    def updateIndex(self, page_pos: int, key: int) -> bool:
+        if not os.path.exists(self.file_name):
+            return False
+
+        # 1) Cargar índice en memoria
+        try:
+            pages, keys = self.getIndex()  # pages = [p0, p1, ..., p_{m-1}], keys = [k1, ..., k_{m-1}]
+        except FileNotFoundError:
+            return False
+
+        if len(pages) == 0:
+            return False  # índice corrupto
+
+        # 2) Buscar posición de inserción con upper_bound (después de duplicados)
+        #    pos ∈ [0 .. len(keys)]
+        left, right = 0, len(keys)  # nota: right es "one past the end" para upper_bound
+        while left < right:
+            mid = (left + right) // 2
+            if keys[mid] <= key:
+                left = mid + 1
+            else:
+                right = mid
+        pos = left  # insertar después de iguales
+
+        # 3) Construir nuevas listas insertadas
+        # keys: insertamos en pos
+        new_keys = keys[:pos] + [key] + keys[pos:]
+
+        # pages[1:]: pares asociados a keys; insertamos page_pos en el mismo pos
+        tail_pages = pages[1:]  # [p1, p2, ..., p_{m-1}]
+        new_tail_pages = tail_pages[:pos] + [page_pos] + tail_pages[pos:]
+
+        # Sanidad: tras insertar, deben tener misma longitud
+        assert len(new_keys) == len(new_tail_pages)
+
+        new_size = len(pages) + 1  # old_size = len(pages); sumamos 1 página nueva
+        p0 = pages[0]
+
+        # 4) Reescribir archivo completo
+        with open(self.file_name, 'r+b') as file:
+            file.seek(0)
+            file.write(struct.pack(self.FORMAT_HEADER, new_size))  # size
+            file.write(struct.pack('i', p0))  # p0
+            for ki, pi in zip(new_keys, new_tail_pages):  # (k_i, p_i) para i>=1
+                file.write(struct.pack('i', ki))
+                file.write(struct.pack('i', pi))
+            file.truncate(file.tell())
+
+        return True
 
     def search_position(self, record_id: int):
         pages, keys = self.getIndex()
@@ -187,28 +236,49 @@ class ISAM:
             return
 
         position = indexf.search_position(record.id)
-        print("K = ", position)
 
         with open(self.file_name, 'r+b') as file:
             if position == "START" or position == "END":
                 file.seek(0, 2)
                 new_page = Page([record])
                 page_pos = file.tell()
-                print("Record id: ", record.id)
                 indexf.addIndex(page_pos, record.id)
                 file.write(new_page.pack())
                 return "Added"
             else:
                 pages, keys = indexf.getIndex()
                 page_pos = pages[position - 1]
-                file.seek(page_pos * Page.SIZE_OF_PAGE)
+                file.seek(page_pos)
                 page = Page.unpack(file.read(Page.SIZE_OF_PAGE))
 
                 if len(page.records) + 1 > BLOCK_FACTOR:
+
+                    record_position = page.position(record.id)
+
+                    # crecemos en 1 para tener hueco
+                    page.records.append(page.records[-1] if page.records else record)
+
+                    # desplazamos a la derecha
+                    for i in range(len(page.records) - 1, record_position, -1):
+                        page.records[i] = page.records[i - 1]
+
+                    # colocamos el nuevo
+                    page.records[record_position] = record
+
+                    r1 = page.records[:len(page.records)//2]
+                    r2 = page.records[len(page.records)//2:]
+
+                    page.records = r1
+
+                    file.seek(page_pos)
+                    file.write(page.pack())
+
                     file.seek(0, 2)
-                    new_page = Page([record])
+                    new_page = Page(r2)
+                    page_pos = file.tell()
+                    indexf.updateIndex(page_pos, r2[0].id)
                     file.write(new_page.pack())
-                    # TODO
+
                     return "Added new Page at the end"
 
                 record_position = page.position(record.id)
@@ -223,10 +293,16 @@ class ISAM:
                 # colocamos el nuevo
                 page.records[record_position] = record
 
-                file.seek(page_pos * Page.SIZE_OF_PAGE)
+                file.seek(page_pos)
                 file.write(page.pack())
 
                 return "Record inserted successfully"
+
+    def search(self, record_id: int):
+        pass
+
+    def delete(self, record_id: int):
+        pass
 
     def scanAll(self):
         # Iterar en todas las paginas y mostrar la informacion de los registros
@@ -234,6 +310,7 @@ class ISAM:
             file.seek(0, 2)
             numPages = file.tell() // Page.SIZE_OF_PAGE
             file.seek(0, 0)
+            print()
             for i in range(numPages):
                 print("-- Page ", i + 1)
                 page_data = file.read(Page.SIZE_OF_PAGE)
@@ -242,11 +319,29 @@ class ISAM:
                     print(record)
 
 ## Main
-dataf = ISAM("data.dat")
+isamf = ISAM("data.dat")
 indexf = IndexFile("index.dat")
-# dataf.add(Record(1, "Estabilizador de Voltaje", 25, 192.26, "2024-10-21"))
-# dataf.add(Record(10, "Bascula Inteligente", 43, 1809.71, "2024-05-07"))
-# dataf.add(Record(3, "Estabilizador de Voltaje", 7, 1204.21, "2024-08-21"))
+
+records = []
+
+with open("sales_dataset_unsorted.csv", newline='', encoding="utf-8") as csvfile:
+    reader = csv.reader(csvfile, delimiter=';')
+    next(reader)  # saltamos el encabezado
+
+    for row in reader:
+        # row = [id, nombre, cantidad, precio, fecha]
+        id_prod = int(row[0])
+        nombre = row[1][:40]                 # ajustamos a 40 chars
+        cantidad = int(row[2])
+        precio = float(row[3])
+        fecha = row[4][:15]                  # ajustamos a 15 chars
+
+        record = Record(id_prod, nombre, cantidad, precio, fecha)
+        records.append(record)
+
+for record in records:
+    isamf.add(record)
+
 indexf.scanALL()
-dataf.scanAll()
+isamf.scanAll()
 
