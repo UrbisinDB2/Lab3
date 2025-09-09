@@ -64,15 +64,34 @@ class Page:
             offset += Record.SIZE_OF_RECORD
         return Page(records, next_page)
 
+    def position(self, record_id: int) -> int | None:
+        left, right = 0, len(self.records) - 1
+
+        while left <= right:
+            mid = (left + right) // 2
+            mid_id = self.records[mid].id  # asumiendo que Record tiene atributo .id
+
+            if mid_id == record_id:
+                # Ya existe, terminamos la inserción
+                return None
+            elif mid_id < record_id:
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        # Si no existe, retornamos la posición de inserción
+        return left
+
+
 class IndexFile:
     FORMAT_HEADER = 'i'
     SIZE_HEADER = struct.calcsize(FORMAT_HEADER)
     SIZE_OF_INDEX = SIZE_HEADER + struct.calcsize('i') * INDEX_FACTOR + struct.calcsize('i') * (INDEX_FACTOR + 1)
 
-    def __init__(self, file_name: str):
+    def __init__(self, file_name: str, pages = [], keys = []):
         self.file_name = file_name
-        self.pages = []
-        self.keys = []
+        self.pages = pages
+        self.keys = keys
 
     def getIndex(self):
         pages = []
@@ -80,26 +99,47 @@ class IndexFile:
         with open(self.file_name, 'rb') as file:
             size = struct.unpack('i', file.read(4))[0]
 
-            for i in range(size):
-                pi = struct.unpack('i', file.read(4))[0]
-                pages.append(pi)
-                ki = struct.unpack('i', file.read(4))[0]
-                keys.append(ki)
+            if size == 1:
+                file.seek(4)
+                p0 = struct.unpack('i', file.read(4))[0]
+                pages.append(p0)
+            else:
+                file.seek(4)
+                p0 = struct.unpack('i', file.read(4))[0]
+                pages.append(p0)
+
+                for i in range(1, size):
+                    ki = struct.unpack('i', file.read(4))[0]
+                    keys.append(ki)
+                    pi = struct.unpack('i', file.read(4))[0]
+                    pages.append(pi)
 
         return pages, keys
 
 
     def addIndex(self, page_pos: int, key: int):
-        import os
         if not os.path.exists(self.file_name):
             with open(self.file_name, 'wb') as file:
                 file.write(struct.pack(self.FORMAT_HEADER, 1))
                 file.write(struct.pack('i', page_pos))
-                file.write(struct.pack('i', key))
             return
+
+        with open(self.file_name, 'r+b') as file:
+            file.seek(0, 2)
+            file.write(struct.pack('i',key))
+            file.write(struct.pack('i', page_pos))
+            file.seek(0)
+            size = struct.unpack('i', file.read(4))[0]
+            size += 1
+            file.seek(0)
+            file.write(struct.pack(self.FORMAT_HEADER, size))
+
 
     def search_position(self, record_id: int):
         pages, keys = self.getIndex()
+
+        if len(keys) == 0:
+            return "START"
 
         left, right = 0, len(keys) - 1
 
@@ -110,9 +150,10 @@ class IndexFile:
             else:
                 right = mid - 1
 
+        if left == len(keys):
+            return "END"
 
-
-        return left
+        return left + 1
 
 
     def scanALL(self):
@@ -123,10 +164,11 @@ class IndexFile:
             pages, keys = self.getIndex()
             print("Pages: ", end='')
             for page in pages:
-                print(str(page) + ", ")
+                print(str(page), end=", ")
+            print()
             print("Keys: ", end='')
             for key in keys:
-                print(str(key) + ", ")
+                print(str(key), end=", ")
         except FileNotFoundError:
             print("File not found")
 
@@ -144,28 +186,47 @@ class ISAM:
                 file.write(new_page.pack())
             return
 
-        pos = indexf.search_position(record.id)
-        print("Pos = ", pos)
+        position = indexf.search_position(record.id)
+        print("K = ", position)
 
         with open(self.file_name, 'r+b') as file:
-            file.seek()
+            if position == "START" or position == "END":
+                file.seek(0, 2)
+                new_page = Page([record])
+                page_pos = file.tell()
+                print("Record id: ", record.id)
+                indexf.addIndex(page_pos, record.id)
+                file.write(new_page.pack())
+                return "Added"
+            else:
+                pages, keys = indexf.getIndex()
+                page_pos = pages[position - 1]
+                file.seek(page_pos * Page.SIZE_OF_PAGE)
+                page = Page.unpack(file.read(Page.SIZE_OF_PAGE))
 
-        # with open(self.file_name, 'r+b') as file:
-        #     file.seek(0, 2)
-        #     filesize = file.tell()
-        #     pos_last_page = filesize - Page.SIZE_OF_PAGE
-        #     file.seek(pos_last_page, 0)
-        #     page = Page.unpack(file.read(Page.SIZE_OF_PAGE))
-        #     # si hay espacio, agregamos el registro a la pagina
-        #     if len(page.records) < BLOCK_FACTOR:
-        #         page.records.append(record)
-        #         file.seek(pos_last_page, 0)
-        #         file.write(page.pack())
-        #     else:
-        #         # crear nueva pagina
-        #         file.seek(0, 2)
-        #         new_page = Page([record])
-        #         file.write(new_page.pack())
+                if len(page.records) + 1 > BLOCK_FACTOR:
+                    file.seek(0, 2)
+                    new_page = Page([record])
+                    file.write(new_page.pack())
+                    # TODO
+                    return "Added new Page at the end"
+
+                record_position = page.position(record.id)
+
+                # crecemos en 1 para tener hueco
+                page.records.append(page.records[-1] if page.records else record)
+
+                # desplazamos a la derecha
+                for i in range(len(page.records) - 1, record_position, -1):
+                    page.records[i] = page.records[i - 1]
+
+                # colocamos el nuevo
+                page.records[record_position] = record
+
+                file.seek(page_pos * Page.SIZE_OF_PAGE)
+                file.write(page.pack())
+
+                return "Record inserted successfully"
 
     def scanAll(self):
         # Iterar en todas las paginas y mostrar la informacion de los registros
@@ -183,8 +244,8 @@ class ISAM:
 ## Main
 dataf = ISAM("data.dat")
 indexf = IndexFile("index.dat")
-dataf.add(Record(1, "Estabilizador de Voltaje", 25, 192.26, "2024-10-21"))
-# dataf.add(Record(2, "Bascula Inteligente", 43, 1809.71, "2024-05-07"))
+# dataf.add(Record(1, "Estabilizador de Voltaje", 25, 192.26, "2024-10-21"))
+# dataf.add(Record(10, "Bascula Inteligente", 43, 1809.71, "2024-05-07"))
 # dataf.add(Record(3, "Estabilizador de Voltaje", 7, 1204.21, "2024-08-21"))
 indexf.scanALL()
 dataf.scanAll()
